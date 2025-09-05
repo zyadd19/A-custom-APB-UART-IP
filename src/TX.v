@@ -1,0 +1,274 @@
+////////////////////////////////////////////////////////////////////////
+//  UART Transmitter (APB-compatible naming)
+//
+//  Trigger transmission by setting tx_en = 1 for 1 cycle
+//  tx_busy = 1 when transmitting
+//  tx_done = 1 for 1 cycle when all bits are transmitted
+//  async active-low PRESETn
+////////////////////////////////////////////////////////////////////////
+
+module uart_transmitter #(
+    parameter BAUD_RATE   = 9600,           // baud rate in bit/s
+    parameter CLK_FREQ    = 100_000_000,    // clock frequency in Hz
+    parameter DATA_BITS   = 8               // number of data bits
+) ( 
+    input                           PCLK,        // system clock (100 MHz)
+    input                           PRESETn,     // async active-low reset
+    input                           tx_en,       // transmission enable (trigger pulse)
+    input       [DATA_BITS-1:0]     tx_data,     // parallel data to send
+
+    output  reg                     tx_busy,     // busy while transmitting
+    output  reg                     tx_done,     // done pulse after transmission
+    output  reg                     tx_serial    // serial TX line
+);
+
+    localparam CLKS_PER_BIT =   CLK_FREQ / BAUD_RATE;          
+    localparam CLK_CNTER_BW =   $clog2(CLKS_PER_BIT) + 1;     
+    localparam BIT_CNTER_BW =   $clog2(DATA_BITS) + 1;        
+
+    // FSM states
+    localparam IDLE      = 2'b00;
+    localparam START_BIT = 2'b01;
+    localparam DATA_BITS_STATE = 2'b11;
+    localparam STOP_BIT  = 2'b10;
+
+    reg [CLK_CNTER_BW-1:0]  clk_cnter;  
+    reg [BIT_CNTER_BW-1:0]  bit_cnter;  
+
+    // registered input data
+    reg [DATA_BITS-1:0] r_tx_data;
+
+    reg [1:0]  state, next_state;
+
+    reg start_bit_init;
+    reg data_bit_init;
+    reg stop_bit_init;
+    reg stop_bit_end;
+    reg busy;
+
+    // -------------------------------
+    // FSM next state logic
+    // -------------------------------
+    always @(*) begin
+        next_state = IDLE;
+        case (state)
+            IDLE: if (tx_en == 1'b1) 
+                      next_state = START_BIT;
+                  else 
+                      next_state = IDLE;
+
+            START_BIT: if (data_bit_init) 
+                           next_state = DATA_BITS_STATE;
+                       else 
+                           next_state = START_BIT;
+
+            DATA_BITS_STATE: if (stop_bit_init) 
+                                 next_state = STOP_BIT;
+                             else 
+                                 next_state = DATA_BITS_STATE;
+
+            STOP_BIT: if (stop_bit_end) 
+                          next_state = IDLE;
+                      else 
+                          next_state = STOP_BIT;
+        endcase
+    end
+
+    // -------------------------------
+    // FSM output logic
+    // -------------------------------
+    always @(*) begin
+        start_bit_init = 1'b0;
+        data_bit_init  = 1'b0;
+        stop_bit_init  = 1'b0;
+        stop_bit_end   = 1'b0;
+        busy           = 1'b1;
+        case (state)
+            IDLE: begin
+                start_bit_init = (tx_en == 1'b1);
+                busy = 1'b0;
+            end
+            START_BIT: data_bit_init = (clk_cnter == CLKS_PER_BIT);
+            DATA_BITS_STATE: begin
+                if (bit_cnter < DATA_BITS) 
+                    data_bit_init = (clk_cnter == CLKS_PER_BIT);
+                else 
+                    stop_bit_init = (clk_cnter == CLKS_PER_BIT);
+            end
+            STOP_BIT: stop_bit_end = (clk_cnter == CLKS_PER_BIT);
+        endcase
+    end
+
+    // -------------------------------
+    // FSM state register
+    // -------------------------------
+    always @(posedge PCLK or negedge PRESETn) begin
+        if (~PRESETn) 
+            state <= IDLE;
+        else 
+            state <= next_state;
+    end
+
+    // -------------------------------
+    // Register input data
+    // -------------------------------
+    always @(posedge PCLK or negedge PRESETn) begin
+        if (~PRESETn) 
+            r_tx_data <= {DATA_BITS{1'b0}};
+        else if (start_bit_init) 
+            r_tx_data <= tx_data;
+    end
+
+    // -------------------------------
+    // TX line control
+    // -------------------------------
+    always @(posedge PCLK or negedge PRESETn) begin
+        if (~PRESETn) 
+            tx_serial <= 1'b1;   // idle high
+        else begin
+            if (start_bit_init) 
+                tx_serial <= 1'b0;                       // start bit
+            else if (data_bit_init) 
+                tx_serial <= r_tx_data[bit_cnter];       // data bits
+            else if (stop_bit_init) 
+                tx_serial <= 1'b1;                       // stop bit
+        end
+    end
+
+    // -------------------------------
+    // Counters
+    // -------------------------------
+    always @(posedge PCLK or negedge PRESETn) begin
+        if (~PRESETn) begin
+            clk_cnter <= {CLK_CNTER_BW{1'b0}};
+            bit_cnter <= {BIT_CNTER_BW{1'b0}};
+        end else begin
+            case (state)
+                IDLE: begin
+                    clk_cnter <= 0;
+                    bit_cnter <= 0;
+                end
+                START_BIT: begin
+                    if (clk_cnter < CLKS_PER_BIT) 
+                        clk_cnter <= clk_cnter + 1'b1;
+                    else 
+                        clk_cnter <= 0;
+                    if (data_bit_init) 
+                        bit_cnter <= bit_cnter + 1'b1;
+                end
+                DATA_BITS_STATE: begin
+                    if (clk_cnter < CLKS_PER_BIT) 
+                        clk_cnter <= clk_cnter + 1'b1;
+                    else 
+                        clk_cnter <= 0;
+                    if (data_bit_init) 
+                        bit_cnter <= bit_cnter + 1'b1;
+                    else if (stop_bit_init) 
+                        bit_cnter <= 0;
+                end
+                STOP_BIT: if (clk_cnter < CLKS_PER_BIT) 
+                              clk_cnter <= clk_cnter + 1'b1;
+                          else 
+                              clk_cnter <= 0;
+            endcase
+        end
+    end
+
+    // -------------------------------
+    // Status signals
+    // -------------------------------
+    always @(posedge PCLK or negedge PRESETn) begin
+        if (~PRESETn) begin
+            tx_done <= 1'b0;
+            tx_busy <= 1'b0;
+        end else begin
+            tx_done <= stop_bit_end;   // tx done at end of stop bit
+            tx_busy <= busy;
+        end
+    end
+
+endmodule
+
+
+
+
+
+
+
+
+
+
+
+
+`timescale 1ns / 1ps
+
+module uart_transmitter_tb();
+    
+    parameter BAUD_RATE   = 9600;          // baud rate in bit/s
+    parameter CLK_FREQ    = 100_000_000;   // 100 MHz clock
+    parameter DATA_BITS   = 8;             // number of bits to be transmitted
+
+    real BAUD_RATE_REAL = BAUD_RATE;
+    real BAUD_PERIOD_NS = 104166.6667 ; //1_000_000_000.0 / BAUD_RATE_REAL;   // baud period in ns (~104.167us)
+    real WAIT_TIME      = 1041666.667 ; //BAUD_PERIOD_NS * (2 + DATA_BITS);   // frame duration (start + data + stop)
+
+    reg  PCLK, PRESETn;
+    reg  tx_en;
+    reg  [DATA_BITS-1:0] tx_data;
+    wire tx_busy, tx_done;
+    wire tx_serial;
+
+    // DUT instantiation
+    uart_transmitter #(
+        .BAUD_RATE(BAUD_RATE),
+        .CLK_FREQ(CLK_FREQ),
+        .DATA_BITS(DATA_BITS)
+    ) dut (
+        .PCLK(PCLK),
+        .PRESETn(PRESETn),
+        .tx_en(tx_en),
+        .tx_data(tx_data),
+        .tx_busy(tx_busy),
+        .tx_done(tx_done),
+        .tx_serial(tx_serial)
+    );
+
+    // Test sequence
+    initial begin
+        PCLK     = 1;
+        PRESETn  = 0;
+        tx_en    = 1'b0;
+        #100 PRESETn = 1;
+
+        send_data(8'b0101_0101);   // 0x55
+        send_data(8'b1001_1001);   // 0x99
+
+        #200;
+        $finish;
+    end
+
+    // Task to send one byte
+    task send_data;
+        input [7:0] data;
+        begin
+            tx_data = data;
+            #20 tx_en = 1'b1;      // trigger pulse
+            #20 tx_en = 1'b0;
+            #WAIT_TIME;            // wait until frame finishes
+            #200;                  // gap between frames
+        end
+    endtask
+
+    // 100 MHz clock generation (10 ns period)
+    always #5 PCLK = ~PCLK; 
+
+endmodule
+
+
+
+
+
+
+
+
+
