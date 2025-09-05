@@ -1,6 +1,6 @@
 
 ////////////////////////////////////////////////////////////////////////
-//  UART Transmitter (APB-compatible naming)
+//  UART Transmitter 
 //
 //  Trigger transmission by setting tx_en = 1 for 1 cycle
 //  tx_busy = 1 when transmitting
@@ -187,5 +187,6 @@ module uart_transmitter #(
             tx_busy <= busy;
         end
     end
+
 
 endmodule
