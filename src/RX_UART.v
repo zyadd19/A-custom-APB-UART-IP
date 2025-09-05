@@ -1,6 +1,6 @@
 
 ////////////////////////////////////////////////////////////////////////
-//  UART Receiver (APB-compatible naming)
+//  UART Receiver 
 //
 //  rx_done set 1 for 1 cycle when all bits are received
 //  async active low reset_n
@@ -177,4 +177,5 @@ module uart_receiver #(
     end
 
 endmodule
+
 
